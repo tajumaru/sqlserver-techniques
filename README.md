@@ -33,7 +33,7 @@
 `.github/workflows/query-plan-check.yml` は、対象クエリの実行プランを自動判定するサンプル。
 
 - SQL Server 2022 のコンテナに対して `ci/seed.sql` でデモデータを作り、`ci/targets/*.sql` を実際のプラン付きで実行して判定する
-- 判定ルール（`ci/dump-plans.sh` でプランを取得し `ci/check_plans.py` で判定、閾値は `ci/plan-check.config.json`）:
+- 判定ルール（`ci/Invoke-PlanCheck.ps1`、閾値は `ci/plan-check.config.json`）:
   - Clustered Index Scan / Table Scan / Index Scan が出たら失敗（許可テーブルは config で指定）
   - Key Lookup / RID Lookup が上限を超えたら失敗
   - PlanAffectingConvert（Seek Plan）が出たら失敗＝暗黙変換で Seek が落ちている

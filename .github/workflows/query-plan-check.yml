@@ -58,8 +58,6 @@ jobs:
             -Username $env:SQLSERVER_USER -Password $env:SQLSERVER_PASSWORD `
             -TrustServerCertificate -InputFile ci/seed.sql
 
-      - name: Dump plans
-        run: bash ci/dump-plans.sh
-
-      - name: Judge plans
-        run: python3 ci/check_plans.py
+      - name: Run plan checks
+        shell: pwsh
+        run: ./ci/Invoke-PlanCheck.ps1
