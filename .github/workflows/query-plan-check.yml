@@ -1,0 +1,63 @@
+name: Query plan check
+
+# 対象クエリの実行プランを取り、インデックスの効き方を合否判定するサンプル。
+# このままでは SQL Server のコンテナを相手にデモデータで回る。
+# 実 DB を相手にする場合は jobs の services を消し、runs-on を DB に届く
+# self-hosted ランナーに変えて、接続先を Secrets から渡すこと。
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'ci/**'
+      - 'queries/**'
+      - '.github/workflows/query-plan-check.yml'
+
+jobs:
+  plan-check:
+    runs-on: ubuntu-latest
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: 'Sample!Passw0rd'
+        ports:
+          - 1433:1433
+    env:
+      SQLSERVER_HOST: localhost
+      SQLSERVER_DB: PlanCheckDemo
+      SQLSERVER_USER: sa
+      SQLSERVER_PASSWORD: 'Sample!Passw0rd'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SqlServer module
+        shell: pwsh
+        run: Install-Module SqlServer -Scope CurrentUser -Force
+
+      - name: Wait for SQL Server and create demo database
+        shell: pwsh
+        run: |
+          $conn = @{
+            ServerInstance = $env:SQLSERVER_HOST
+            Username = $env:SQLSERVER_USER
+            Password = $env:SQLSERVER_PASSWORD
+            TrustServerCertificate = $true
+          }
+          for ($i = 0; $i -lt 30; $i++) {
+            try { Invoke-Sqlcmd @conn -Query 'SELECT 1' | Out-Null; break }
+            catch { Start-Sleep -Seconds 5 }
+          }
+          Invoke-Sqlcmd @conn -Query "CREATE DATABASE [$env:SQLSERVER_DB]"
+
+      - name: Seed sample data
+        shell: pwsh
+        run: |
+          Invoke-Sqlcmd -ServerInstance $env:SQLSERVER_HOST -Database $env:SQLSERVER_DB `
+            -Username $env:SQLSERVER_USER -Password $env:SQLSERVER_PASSWORD `
+            -TrustServerCertificate -InputFile ci/seed.sql
+
+      - name: Run plan checks
+        shell: pwsh
+        run: ./ci/Invoke-PlanCheck.ps1

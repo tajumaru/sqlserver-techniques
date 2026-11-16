@@ -27,3 +27,20 @@
 
 - `sys.dm_db_index_usage_stats` は SQL Server 再起動でリセットされる。起動直後の値は当てにならない。
 - プランキャッシュの内容も再起動やメモリ圧迫で消える。調査は遅さが再現している時に行う。
+
+## GitHub Actions でクエリチェック（サンプル）
+
+`.github/workflows/query-plan-check.yml` は、対象クエリの実行プランを自動判定するサンプル。
+
+- SQL Server 2022 のコンテナに対して `ci/seed.sql` でデモデータを作り、`ci/targets/*.sql` を実際のプラン付きで実行して判定する
+- 判定ルール（`ci/Invoke-PlanCheck.ps1`、閾値は `ci/plan-check.config.json`）:
+  - Clustered Index Scan / Table Scan / Index Scan が出たら失敗（許可テーブルは config で指定）
+  - Key Lookup / RID Lookup が上限を超えたら失敗
+  - PlanAffectingConvert（Seek Plan）が出たら失敗＝暗黙変換で Seek が落ちている
+- `ci/targets-examples/bad-leading-wildcard.sql` は不合格例。`ci/targets/` にコピーして回すと失敗することを確認できる
+
+実 DB を相手にする場合:
+
+1. ワークフローの `services` を消し、`runs-on` を DB にネットワークで届く self-hosted ランナーに変える
+2. 接続先（`SQLSERVER_HOST` / `SQLSERVER_DB` / `SQLSERVER_USER` / `SQLSERVER_PASSWORD`）はリポジトリの Secrets から渡す
+3. チェックしたいクエリを `ci/targets/` に追加する（読み取り専用アカウントで実行すること）
