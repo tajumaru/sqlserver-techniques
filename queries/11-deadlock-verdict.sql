@@ -17,6 +17,15 @@
     最も多く合流点になったテーブルから自動で特定する。
     結果は1つだけ（番号・項目・結果）。
 
+  負荷について：
+    重いのはプランキャッシュの走査だけ。先頭の @PlanScan で選べる。
+      N'間引き' … 既定。文面にテーブル名を含むプランだけに絞り、
+                   200件ごとに1秒休ませながら走査する（CPU を分散）
+      N'しない' … プラン走査を丸ごと省く。記録と統計だけで判定する
+                   （スキャンの有無は「未確認」として判定に出る）
+      N'一括'   … 絞らず一気に走査する。閑散期向け
+    記録の読み取り・合流点の集計・統計の確認はいずれも軽い。
+
   判定の根拠（内部で使っている材料）：
     - 合流点の集計 … 06 と同じ system_health のデッドロックグラフ
     - プランの集計 … 09 と同じプランキャッシュの走査判定
@@ -27,11 +36,11 @@
   注意：
     - ring_buffer に記録が無ければ「記録なし」と判定する
       （古い記録はローテーションで消える。発生直後の実行が確実）。
-    - プランキャッシュの走査は、キャッシュ量が多い環境では
-      数十秒かかることがある。
 */
 
 SET NOCOUNT ON;
+
+DECLARE @PlanScan nvarchar(10) = N'間引き';   -- N'間引き' / N'しない' / N'一括'
 
 -- 1) 直近30件のデッドロックを取り込む（06 と同じ抽出）
 IF OBJECT_ID('tempdb..#dl') IS NOT NULL DROP TABLE #dl;
@@ -157,19 +166,63 @@ DECLARE @top_is_clustered bit =
     CASE WHEN @top_idx IS NOT NULL AND @top_idx = @clustered_name THEN 1 ELSE 0 END;
 
 -- 5) プランの集計（09 と同じ判定：対象テーブルを触るプランとスキャンの有無）
+--    @PlanScan で負荷を選ぶ。'しない' のときは @plans が NULL のままになる
 DECLARE @plans int = NULL, @scans int = NULL;
-IF @oid IS NOT NULL
+IF @oid IS NOT NULL AND @PlanScan <> N'しない'
 BEGIN
     DECLARE @tblb nvarchar(517) = QUOTENAME(@tbl);
-    SELECT
-        @plans = COUNT(*),
-        @scans = SUM(CASE WHEN qp.query_plan.exist('//*:RelOp[@PhysicalOp = "Index Scan"
-                                                              or @PhysicalOp = "Clustered Index Scan"
-                                                              or @PhysicalOp = "Table Scan"]') = 1
-                          THEN 1 ELSE 0 END)
-    FROM sys.dm_exec_query_stats AS qs
-    CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
-    WHERE qp.query_plan.exist('//*:Object[@Table = sql:variable("@tblb")]') = 1;
+
+    IF @PlanScan = N'一括'
+    BEGIN
+        SELECT
+            @plans = COUNT(*),
+            @scans = SUM(CASE WHEN qp.query_plan.exist('//*:RelOp[@PhysicalOp = "Index Scan"
+                                                                  or @PhysicalOp = "Clustered Index Scan"
+                                                                  or @PhysicalOp = "Table Scan"]') = 1
+                              THEN 1 ELSE 0 END)
+        FROM sys.dm_exec_query_stats AS qs
+        CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) AS qp
+        WHERE qp.query_plan.exist('//*:Object[@Table = sql:variable("@tblb")]') = 1;
+    END
+    ELSE
+    BEGIN
+        -- 間引き：文面にテーブル名を含むプランだけに絞り、
+        -- 200件ごとに1秒休ませながら1件ずつ判定する
+        DECLARE @handles TABLE (plan_handle varbinary(64) PRIMARY KEY);
+        INSERT INTO @handles (plan_handle)
+        SELECT DISTINCT qs.plan_handle
+        FROM sys.dm_exec_query_stats AS qs
+        CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
+        WHERE st.text LIKE N'%' + @tbl + N'%';
+
+        SET @plans = 0;
+        SET @scans = 0;
+
+        DECLARE @ph varbinary(64), @qp xml, @done int = 0;
+        DECLARE plan_cur CURSOR LOCAL FAST_FORWARD FOR
+            SELECT plan_handle FROM @handles;
+        OPEN plan_cur;
+        FETCH NEXT FROM plan_cur INTO @ph;
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            SET @qp = NULL;
+            SELECT @qp = query_plan FROM sys.dm_exec_query_plan(@ph);
+            IF @qp IS NOT NULL
+               AND @qp.exist('//*:Object[@Table = sql:variable("@tblb")]') = 1
+            BEGIN
+                SET @plans += 1;
+                IF @qp.exist('//*:RelOp[@PhysicalOp = "Index Scan"
+                                        or @PhysicalOp = "Clustered Index Scan"
+                                        or @PhysicalOp = "Table Scan"]') = 1
+                    SET @scans += 1;
+            END;
+            SET @done += 1;
+            IF @done % 200 = 0 WAITFOR DELAY '00:00:01';
+            FETCH NEXT FROM plan_cur INTO @ph;
+        END;
+        CLOSE plan_cur;
+        DEALLOCATE plan_cur;
+    END;
 END;
 
 -- 6) 統計の鮮度（10 と同じ：最も変わった統計と、最古の最終更新）
@@ -228,7 +281,12 @@ IF @oid IS NOT NULL AND @plans IS NOT NULL
     INSERT INTO #verdict (no, item, result)
     VALUES (4, N'プラン',
             N'対象テーブルを触るプラン ' + CAST(@plans AS nvarchar(10))
-            + N'件、うちスキャン系 ' + CAST(ISNULL(@scans, 0) AS nvarchar(10)) + N'件');
+            + N'件、うちスキャン系 ' + CAST(ISNULL(@scans, 0) AS nvarchar(10)) + N'件'
+            + CASE WHEN @PlanScan = N'間引き' THEN N'（間引き走査）' ELSE N'' END);
+ELSE IF @oid IS NOT NULL
+    INSERT INTO #verdict (no, item, result)
+    VALUES (4, N'プラン',
+            N'プラン走査は未実施（@PlanScan = しない）。スキャンの有無は未確認');
 
 IF @oid IS NOT NULL AND @worst_pct IS NOT NULL
     INSERT INTO #verdict (no, item, result)
@@ -257,11 +315,22 @@ BEGIN
         VALUES (6, N'総合判定',
                 N'合流点は非クラスタ化インデックス「' + ISNULL(@top_idx, N'') + N'」。対策の中心は、掴む順序の統一と、そのインデックスの見直し');
 
-    IF @plans IS NOT NULL AND @plans > 0 AND ISNULL(@scans, 0) * 2 >= @plans AND ISNULL(@worst_pct, 0) >= 20
+    IF @plans IS NULL
+    BEGIN
+        IF ISNULL(@worst_pct, 0) >= 20
+            INSERT INTO #verdict (no, item, result)
+            VALUES (7, N'総合判定（統計）',
+                    N'統計は古い。ただしプラン走査をしていないため、スキャンが頻度を押し上げているかは未確認。@PlanScan を「間引き」にして再実行すると確認できる');
+        ELSE
+            INSERT INTO #verdict (no, item, result)
+            VALUES (7, N'総合判定（統計）',
+                    N'統計は新しめ。プラン走査は未実施のため、スキャンの有無だけ未確認');
+    END
+    ELSE IF @plans > 0 AND ISNULL(@scans, 0) * 2 >= @plans AND ISNULL(@worst_pct, 0) >= 20
         INSERT INTO #verdict (no, item, result)
         VALUES (7, N'総合判定（統計）',
                 N'スキャンのプランが優勢で、統計も古い。統計の更新でデッドロックの頻度が下がる見込みがある');
-    ELSE IF @plans IS NOT NULL AND @plans > 0 AND ISNULL(@scans, 0) * 2 >= @plans
+    ELSE IF @plans > 0 AND ISNULL(@scans, 0) * 2 >= @plans
         INSERT INTO #verdict (no, item, result)
         VALUES (7, N'総合判定（統計）',
                 N'スキャンのプランが優勢だが、統計は新しめ。暗黙変換や WHERE の形を疑う（統計更新の効果は限定的）');
@@ -269,7 +338,7 @@ BEGIN
         INSERT INTO #verdict (no, item, result)
         VALUES (7, N'総合判定（統計）',
                 N'プランはシーク中心だが統計は古い。統計更新は予防にはなるが、頻度の主因ではない可能性が高い');
-    ELSE IF @plans IS NOT NULL
+    ELSE
         INSERT INTO #verdict (no, item, result)
         VALUES (7, N'総合判定（統計）',
                 N'プラン・統計とも大きな異常なし。頻度の主因は、掴む順序と合流点のインデックス側にある');
