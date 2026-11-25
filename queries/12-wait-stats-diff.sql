@@ -3,9 +3,9 @@
   待機統計の「差分」を見る。調査の入口。
 
   仕組み：
-    dm_os_wait_stats はインスタンス起動からの累積なので、そのままでは
+    dm_os_wait_stats はインスタンス起動または手動クリアからの累積なので、そのままでは
     「いつ・何待ちで時間を食ったか」が分からない。このファイルは
-    1回目の実行で現在値を記録し、2回目以降の実行で「前回からの増分」
+    1回目の実行で現在値を記録し、2回目以降の実行で「前回の実行からの増分」
     だけを出す。バッチの実行前と実行後に挟む、障害の前後で挟む、など
     「見たい時間帯」を挟んで使う。
 
@@ -14,7 +14,7 @@
     1回目 …「記録した」という案内だけが返る
     2回目 … 増分の上位15件（待ちの種類・増えた時間・意味）と、
              スナップショット更新の案内が返る
-    3回目以降は、2回目からの増分になる。
+    3回目以降も、前回の実行からの増分になる。
 
   temp テーブルについて：
     差分を取るため、このファイルだけは #wait_snapshot を
@@ -22,9 +22,11 @@
     手動で片付ける場合は DROP TABLE #wait_snapshot を実行する。
 
   注意：
-    - 2回の実行の間にインスタンスが再起動すると累積値が巻き戻る。
-      その場合は「現在値そのもの」を増分として扱う。
-    - 意味のない待機（アイドル系）は集計から除いてある。
+    - 再起動すると接続と基準が消えるため、新しい接続で初回から測る。
+    - 同じ接続内の巻き戻りは手動クリア（DBCC SQLPERF）で起きる。
+      待ち時間の合計が前回より小さい場合は案内だけを返し、今回値を次の基準にする。
+      クリア後に合計が前回以上まで増えると検知できない。
+    - アイドル系の待機は差分表示から除く。リセット検知の合計には含める。
     - 増分の見方：wait_time の大半が signal（CPU に空きがなく待った分）
       なら CPU 側、resource（wait_time − signal）が大半なら
       ロックや I/O など「相手・媒体待ち」側。
@@ -34,30 +36,53 @@ SET NOCOUNT ON;
 
 IF OBJECT_ID('tempdb..#wait_snapshot') IS NULL
 BEGIN
-    SELECT wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms
-    INTO #wait_snapshot
-    FROM sys.dm_os_wait_stats;
+    CREATE TABLE #wait_snapshot (
+        wait_type           nvarchar(60) COLLATE DATABASE_DEFAULT NOT NULL,
+        waiting_tasks_count bigint NOT NULL,
+        wait_time_ms        bigint NOT NULL,
+        signal_wait_time_ms bigint NOT NULL
+    );
+    BEGIN TRY
+        INSERT INTO #wait_snapshot (wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms)
+        SELECT wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms
+        FROM sys.dm_os_wait_stats;
+    END TRY
+    BEGIN CATCH
+        DROP TABLE #wait_snapshot;
+        THROW;
+    END CATCH;
 
-    SELECT N'1回目：現在の待機統計を記録した。調査したい時間帯の後にもう一度、同じセッションで実行すると、その間の増分が出る' AS 案内;
-END
-ELSE
+    SELECT N'1回目の待機統計を記録しました。同じ接続で再実行すると、前回の実行からの増分が出ます。' AS 案内;
+    RETURN;
+END;
+
+IF OBJECT_ID('tempdb..#wait_current') IS NOT NULL DROP TABLE #wait_current;
+CREATE TABLE #wait_current (
+    wait_type           nvarchar(60) COLLATE DATABASE_DEFAULT NOT NULL,
+    waiting_tasks_count bigint NOT NULL,
+    wait_time_ms        bigint NOT NULL,
+    signal_wait_time_ms bigint NOT NULL
+);
+INSERT INTO #wait_current (wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms)
+SELECT wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms
+FROM sys.dm_os_wait_stats;
+
+DECLARE @reset bit = CASE
+    WHEN (SELECT SUM(CONVERT(decimal(38, 0), wait_time_ms)) FROM #wait_current)
+       < (SELECT SUM(CONVERT(decimal(38, 0), wait_time_ms)) FROM #wait_snapshot)
+    THEN 1 ELSE 0 END;
+
+IF @reset = 0
 BEGIN
-    -- 増分（再起動で巻き戻った列は現在値を増分とみなす）
     ;WITH delta AS (
         SELECT
             cur.wait_type,
-            CASE WHEN cur.waiting_tasks_count < snap.waiting_tasks_count
-                 THEN cur.waiting_tasks_count
-                 ELSE cur.waiting_tasks_count - snap.waiting_tasks_count END AS waits_delta,
-            CASE WHEN cur.wait_time_ms < snap.wait_time_ms
-                 THEN cur.wait_time_ms
-                 ELSE cur.wait_time_ms - snap.wait_time_ms END AS wait_ms_delta,
-            CASE WHEN cur.signal_wait_time_ms < snap.signal_wait_time_ms
-                 THEN cur.signal_wait_time_ms
-                 ELSE cur.signal_wait_time_ms - snap.signal_wait_time_ms END AS signal_ms_delta
-        FROM sys.dm_os_wait_stats AS cur
-        INNER JOIN #wait_snapshot AS snap
-            ON snap.wait_type = cur.wait_type
+            cur.waiting_tasks_count - ISNULL(snap.waiting_tasks_count, 0) AS waits_delta,
+            cur.wait_time_ms - ISNULL(snap.wait_time_ms, 0) AS wait_ms_delta,
+            cur.signal_wait_time_ms - ISNULL(snap.signal_wait_time_ms, 0) AS signal_ms_delta
+        FROM #wait_current AS cur
+        LEFT JOIN #wait_snapshot AS snap
+            ON snap.wait_type COLLATE DATABASE_DEFAULT = cur.wait_type
         WHERE cur.wait_type NOT IN (
             'BROKER_EVENTHANDLER', 'BROKER_RECEIVE_WAITFOR', 'BROKER_TASK_STOP',
             'BROKER_TO_FLUSH', 'BROKER_TRANSMITTER', 'CHECKPOINT_QUEUE', 'CHKPT',
@@ -84,7 +109,8 @@ BEGIN
         wait_type,
         waits_delta                                            AS 増えた回数,
         wait_ms_delta                                          AS 増えた待ち時間ms,
-        wait_ms_delta - signal_ms_delta                        AS うち相手媒体待ちms,
+        CASE WHEN wait_ms_delta >= signal_ms_delta
+             THEN wait_ms_delta - signal_ms_delta ELSE 0 END       AS うち相手媒体待ちms,
         signal_ms_delta                                        AS うちCPU待ちms,
         CASE
             WHEN wait_type LIKE 'PAGEIOLATCH%' THEN N'I/O待ち（ディスク読み書き）'
@@ -105,12 +131,34 @@ BEGIN
     FROM delta
     WHERE wait_ms_delta > 0
     ORDER BY wait_ms_delta DESC;
-
-    -- スナップショットを現在値に更新する（次回はここからの増分）
-    DROP TABLE #wait_snapshot;
-    SELECT wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms
-    INTO #wait_snapshot
-    FROM sys.dm_os_wait_stats;
-
-    SELECT N'スナップショットを更新した。次に実行すると、ここからの増分が出る（増分が無ければ結果は空）。片付ける場合は DROP TABLE #wait_snapshot' AS 案内;
 END;
+
+-- 入れ替えに失敗した場合は、直前の基準を保つ。
+DECLARE @outer_tran int = @@TRANCOUNT;
+IF @outer_tran = 0
+    BEGIN TRANSACTION;
+ELSE
+    SAVE TRANSACTION wait_snapshot_update;
+
+BEGIN TRY
+    DELETE FROM #wait_snapshot;
+    INSERT INTO #wait_snapshot (wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms)
+    SELECT wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms
+    FROM #wait_current;
+
+    IF @outer_tran = 0
+        COMMIT TRANSACTION;
+END TRY
+BEGIN CATCH
+    IF @outer_tran = 0 AND XACT_STATE() <> 0
+        ROLLBACK TRANSACTION;
+    ELSE IF @outer_tran > 0 AND XACT_STATE() = 1
+        ROLLBACK TRANSACTION wait_snapshot_update;
+    THROW;
+END CATCH;
+
+DROP TABLE #wait_current;
+SELECT CASE WHEN @reset = 1
+    THEN N'待機統計がリセットされたと判断しました。差分の表示を省き、今回値を新しい基準にしました。'
+    ELSE N'基準を更新しました。次回も前回の実行からの増分が出ます。片付けるには DROP TABLE #wait_snapshot を実行します。'
+END AS 案内;

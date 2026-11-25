@@ -1,9 +1,11 @@
 -- 03: プランキャッシュから対象クエリのプランを引く（本番で再実行できない時）
+-- QueryText はバッチ全体。平均読み取りは文単位の統計で、表示された文面全体とは対応しない場合がある。
+-- TOP は表示件数の上限。
 -- query_plan 列をクリックすると図のプランが開く。そのまま 01 / 02 の @plan にも使える。
 
 SELECT TOP 20
     qs.execution_count,
-    qs.total_logical_reads / qs.execution_count AS AvgLogicalReads,
+    CAST(qs.total_logical_reads AS decimal(28, 4)) / NULLIF(qs.execution_count, 0) AS AvgLogicalReads,
     qs.last_execution_time,
     st.text AS QueryText,
     qp.query_plan

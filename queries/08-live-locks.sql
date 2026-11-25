@@ -4,7 +4,9 @@
 --   デッドロックが起きる時間帯に、対象バッチの実行中に実行する。
 --   結果1: 対象テーブルに今かかっているロックの集計
 --          （どのインデックスに・どのモードで・何件か）
---   結果2: いまブロックし合っているセッションと実行中 SQL
+--          hobt_id から所属を引けないロックは集計から漏れることがある。
+--   結果2: インスタンス全体で待たされている側のリクエストとバッチ文面。
+--          待たせている側は ID のみで、SQL は含まない。
 --
 -- 見るポイント:
 --   - 結果1 で PAGE / OBJECT ロックが大量に出ていたら、
@@ -12,7 +14,7 @@
 --     普段は KEY（行キー）中心のはず。
 --   - 特定の非クラスタ化インデックスにロックが集中していたら、
 --     そこが合流点の候補。
---   - 結果2 の wait_resource と blocking 側の SQL が、
+--   - 結果2 の wait_resource と待たされている側のバッチ文面が、
 --     デッドロック直前の姿を捉えることがある。
 
 DECLARE @SchemaName sysname = N'dbo';
@@ -33,8 +35,9 @@ LEFT JOIN sys.partitions AS p
    AND l.resource_type IN ('KEY', 'PAGE', 'RID')
 LEFT JOIN sys.indexes AS i
     ON i.object_id = p.object_id AND i.index_id = p.index_id
-WHERE (l.resource_type = 'OBJECT' AND l.resource_associated_entity_id = @ObjectId)
-   OR p.object_id = @ObjectId
+WHERE l.resource_database_id = DB_ID()
+  AND ((l.resource_type = 'OBJECT' AND l.resource_associated_entity_id = @ObjectId)
+       OR p.object_id = @ObjectId)
 GROUP BY l.resource_type, COALESCE(i.name, N'(ヒープ/オブジェクト)'),
          l.request_mode, l.request_status
 ORDER BY lock_count DESC;
