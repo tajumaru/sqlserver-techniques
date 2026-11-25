@@ -28,6 +28,16 @@
 - `sys.dm_db_index_usage_stats` は SQL Server 再起動でリセットされる。起動直後の値は当てにならない。
 - プランキャッシュの内容も再起動やメモリ圧迫で消える。調査は遅さが再現している時に行う。
 
+## デッドロック調査
+
+手順は `docs/deadlock-investigation.md`。同じテーブルに複数業務の UPDATE / DELETE / INSERT が重なってデッドロックする形を想定している。
+
+- `queries/05-deadlock-history.sql` — system_health から直近のデッドロックグラフ（XML）を抜く
+- `queries/06-deadlock-summary.sql` — グラフを要約し、合流点（どのインデックスで掴み合ったか）を特定する
+- `queries/07-table-index-detail.sql` — 対象テーブルのインデックス詳細（キー列・包含列・行数）
+- `queries/08-live-locks.sql` — バッチ実行中のロック状況とブロックをその場で見る
+- `queries/09-plan-cache-by-table.sql` — 対象テーブルを触るプランをキャッシュから探し、シーク／スキャンを判定する
+
 ## GitHub Actions でクエリチェック（サンプル）
 
 `.github/workflows/query-plan-check.yml` は、対象クエリの実行プランを自動判定するサンプル。
