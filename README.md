@@ -38,6 +38,7 @@
 - `queries/08-live-locks.sql` — バッチ実行中のロック状況とブロックをその場で見る
 - `queries/09-plan-cache-by-table.sql` — 対象テーブルを触るプランをキャッシュから探し、シーク／スキャンを判定する
 - `queries/10-statistics-freshness.sql` — 対象テーブルの統計情報の鮮度（最終更新と変更行数）を確認する
+- `queries/11-deadlock-verdict.sql` — 判定までを1本で完結させる統合診断。データを持ち出せない環境向け（出力は件数と判定だけ）
 
 ## GitHub Actions でクエリチェック（サンプル）
 
