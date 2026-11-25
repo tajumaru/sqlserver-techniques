@@ -44,7 +44,7 @@
 - `queries/07-table-index-detail.sql` — 対象テーブルのインデックス詳細（キー列・包含列・行数）
 - `queries/08-live-locks.sql` — バッチ実行中のロック状況とブロックをその場で見る
 - `queries/09-plan-cache-by-table.sql` — 同名表を含むコンパイル時のプランを探す。プラン全体で Index Scan、Clustered Index Scan、Table Scan の有無を確認する
-- `queries/10-statistics-freshness.sql` — 対象テーブルの統計情報の鮮度（最終更新と変更回数）を確認する
+- `queries/10-statistics-freshness.sql` — 対象テーブルの統計情報の鮮度（最終更新と変更回数）を確認する。統計ごとに対象の列も表示する
 - `queries/11-deadlock-verdict.sql` — 合流点・プラン・統計の確認をまとめて行う。別 DB なら再実行を案内し、表や確認材料が見つからない場合は未確認と表示する。件数・割合・判定・統計の最終更新日時を返す。外部共有時はインデックス名を伏せる。プラン走査は間引き／なし／一括を選べる
 - `queries/12-wait-stats-diff.sql` — 待機統計の差分。同じセッションで2回実行し、間の時間帯に「何待ちで時間を食ったか」を見る
 - `queries/13-health-check.sql` — 健康診断（統合版）。ブロッキング・実行中・待機の内訳・統計・断片化・デッドロック・メモリ待ちを1回で判定まで返す
