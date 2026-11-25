@@ -80,3 +80,6 @@ SELECT
 FROM #dl AS d
 CROSS APPLY d.graph.nodes('event/data/value/deadlock/resource-list/*') AS t(r)
 ORDER BY d.deadlock_no DESC, resource_type, index_name;
+
+-- 後片付け（同じセッションで再実行しても残らないように）
+DROP TABLE #dl;

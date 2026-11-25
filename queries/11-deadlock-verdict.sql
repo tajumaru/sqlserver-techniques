@@ -347,3 +347,8 @@ END;
 SELECT no, item, result
 FROM #verdict
 ORDER BY no;
+
+-- 後片付け（同じセッションで再実行しても残らないように）
+DROP TABLE #verdict;
+DROP TABLE #res;
+DROP TABLE #dl;
